@@ -3,7 +3,9 @@ import os
 import json
 import keyboard
 from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, 
-                             QHBoxLayout, QSlider, QCheckBox, QDoubleSpinBox)
+                             QHBoxLayout, QSlider, QCheckBox, QDoubleSpinBox, QComboBox)
+import sounddevice as sd
+from superqt import QDoubleRangeSlider
 from PyQt5.QtCore import Qt, QObject, pyqtSignal
 from sound import Sound, SoundPlayer
 
@@ -41,6 +43,13 @@ def create_sound_row(filename):
     layout = QHBoxLayout()
     file_config = config.get(filename, {})
     macro_signal = MacroSignal()
+
+    filepath = os.path.join(sound_dir, filename)
+    sound_obj = Sound(filename, filepath, target_fs=48000)
+    duration = len(sound_obj.original_data) / sound_obj.fs
+
+    range_slider = QDoubleRangeSlider(Qt.Horizontal)
+    range_slider.setRange(0.0, duration)
     
     play_btn = QPushButton(filename)
     play_btn.setFixedWidth(150)
@@ -78,11 +87,17 @@ def create_sound_row(filename):
     layout.addWidget(vol_slider)
     layout.addWidget(shortcut_btn)
     layout.addWidget(reset_btn)
-    layout.addWidget(start_spin)
-    layout.addWidget(end_spin)
+    layout.addWidget(range_slider)
 
-    filepath = os.path.join(sound_dir, filename)
-    sound_obj = Sound(filename, filepath, target_fs=48000)
+
+    saved_start = file_config.get("start", 0.0)
+    saved_end = file_config.get("end", duration)
+    if saved_end == 0.0:
+        saved_end = duration
+
+    range_slider.setValue((saved_start, saved_end))
+    range_slider.setFixedWidth(200)
+
     current_hook = [None]
 
     def bind_key(scan_code):
@@ -99,18 +114,24 @@ def create_sound_row(filename):
         )
 
     def get_current_settings():
-        return start_spin.value(), end_spin.value(), vol_slider.value()
+        start_val, end_val = range_slider.value()
+        return start_val, end_val, vol_slider.value()
 
     def save_current_state(*args):
+        start_val, end_val = range_slider.value()
+        
         if filename not in config:
             config[filename] = {}
             
         config[filename].update({
             "volume": vol_slider.value(),
-            "start": start_spin.value(),
-            "end": end_spin.value()
+            "start": start_val,
+            "end": end_val
         })
         save_config(config)
+
+    vol_slider.valueChanged.connect(save_current_state)
+    range_slider.valueChanged.connect(save_current_state)
 
     def ui_play():
         start, end, vol = get_current_settings()
@@ -241,6 +262,30 @@ reset_btn.clicked.connect(reset_macros)
 global_controls_layout.addWidget(stop_btn)
 global_controls_layout.addWidget(stop_shortcut_btn)
 global_controls_layout.addWidget(reset_btn)
+
+device_combo = QComboBox()
+
+devices = sd.query_devices()
+for i, dev in enumerate(devices):
+    if dev['max_output_channels'] > 0:
+        device_combo.addItem(f"{i} - {dev['name']}", i)
+
+saved_device_id = config.get("output_device_id", 45)
+player.output_id = saved_device_id
+
+index = device_combo.findData(saved_device_id)
+if index >= 0:
+    device_combo.setCurrentIndex(index)
+
+def update_output_device(idx):
+    device_id = device_combo.itemData(idx)
+    player.output_id = device_id
+    config["output_device_id"] = device_id
+    save_config(config)
+
+device_combo.currentIndexChanged.connect(update_output_device)
+
+global_controls_layout.addWidget(device_combo)
 
 main_layout.addLayout(global_controls_layout)
 
