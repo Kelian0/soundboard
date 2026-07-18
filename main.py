@@ -15,8 +15,6 @@ macros_active = True
 shortcut_buttons = []
 stop_signal = MacroSignal()
 
-
-
 def load_config():
     try:
         with open(CONFIG_FILE, 'r') as f:
@@ -30,24 +28,6 @@ def save_config(config_data):
 
 config = load_config()
 player = SoundPlayer(output_id=45) 
-
-def assign_hotkey(button, sound_obj, player_obj, get_settings_cb, save_cb):
-    button.setText("Press a key...")
-    
-    def on_key_event(event):
-        keyboard.unhook(hook)
-        button.setText(event.name)
-        save_cb()
-        
-        def play_macro():
-            if macros_active:
-                start, end, vol = get_settings_cb()
-                sound_obj.apply_settings(start, end, vol)
-                player_obj.play(sound_obj)
-                
-        keyboard.on_press_key(event.name, lambda _: play_macro(), suppress=False)
-
-    hook = keyboard.on_press(on_key_event)
 
 sound_dir = "sounds"
 if not os.path.exists(sound_dir):
@@ -70,10 +50,16 @@ def create_sound_row(filename):
     vol_slider.setValue(file_config.get("volume", 100))
     vol_slider.setFixedWidth(150)
     
-    shortcut_btn = QPushButton(file_config.get("shortcut", "Set Key"))
+    saved_name = file_config.get("shortcut_name", "Set Key")
+    saved_code = file_config.get("shortcut_code", None)
+    
+    shortcut_btn = QPushButton(saved_name)
     shortcut_btn.setFixedWidth(80)
     shortcut_buttons.append(shortcut_btn)
 
+    reset_btn = QPushButton("Reset")
+    reset_btn.setFixedWidth(50)
+    
     start_spin = QDoubleSpinBox()
     start_spin.setPrefix("Start: ")
     start_spin.setSuffix(" s")
@@ -91,22 +77,39 @@ def create_sound_row(filename):
     layout.addWidget(play_btn)
     layout.addWidget(vol_slider)
     layout.addWidget(shortcut_btn)
+    layout.addWidget(reset_btn)
     layout.addWidget(start_spin)
     layout.addWidget(end_spin)
 
     filepath = os.path.join(sound_dir, filename)
     sound_obj = Sound(filename, filepath, target_fs=48000)
-    
+    current_hook = [None]
+
+    def bind_key(scan_code):
+        if current_hook[0] is not None:
+            try:
+                keyboard.remove_hotkey(current_hook[0])
+            except Exception:
+                pass
+                
+        current_hook[0] = keyboard.on_press_key(
+            scan_code, 
+            lambda _: macro_signal.trigger.emit() if macros_active else None, 
+            suppress=False
+        )
+
     def get_current_settings():
         return start_spin.value(), end_spin.value(), vol_slider.value()
 
     def save_current_state(*args):
-        config[filename] = {
+        if filename not in config:
+            config[filename] = {}
+            
+        config[filename].update({
             "volume": vol_slider.value(),
             "start": start_spin.value(),
-            "end": end_spin.value(),
-            "shortcut": shortcut_btn.text()
-        }
+            "end": end_spin.value()
+        })
         save_config(config)
 
     def ui_play():
@@ -115,43 +118,53 @@ def create_sound_row(filename):
         player.play(sound_obj)
 
     macro_signal.trigger.connect(ui_play)
+
     def assign_hotkey(button):
         button.setText("Press a key...")
         
         def on_key_event(event):
             keyboard.unhook(hook)
-            button.setText(event.name)
-            save_current_state()
+            button.setText(str(event.name))
             
-            # Au lieu de jouer l'audio, on émet le signal
-            keyboard.on_press_key(
-                event.name, 
-                lambda _: macro_signal.trigger.emit() if macros_active else None, 
-                suppress=False
-            )
+            if filename not in config:
+                config[filename] = {}
+                
+            config[filename]["shortcut_name"] = event.name
+            config[filename]["shortcut_code"] = event.scan_code
+            save_config(config)
+            bind_key(event.scan_code)
 
         hook = keyboard.on_press(on_key_event)
+
+    def reset_hotkey():
+        if current_hook[0] is not None:
+            try:
+                keyboard.remove_hotkey(current_hook[0])
+            except Exception:
+                pass
+            current_hook[0] = None
+            
+        shortcut_btn.setText("Set Key")
+        if filename in config:
+            config[filename]["shortcut_name"] = "Set Key"
+            config[filename]["shortcut_code"] = None
+            save_config(config)
 
     vol_slider.valueChanged.connect(save_current_state)
     start_spin.valueChanged.connect(save_current_state)
     end_spin.valueChanged.connect(save_current_state)
     play_btn.clicked.connect(ui_play)
-    
     shortcut_btn.clicked.connect(lambda: assign_hotkey(shortcut_btn))
+    reset_btn.clicked.connect(reset_hotkey)
 
-    # Rechargement de la touche au démarrage
-    saved_key = file_config.get("shortcut", "Set Key")
-    if saved_key != "Set Key":
-        keyboard.on_press_key(
-            saved_key, 
-            lambda _: macro_signal.trigger.emit() if macros_active else None, 
-            suppress=False
-        )
+    if saved_code is not None:
+        bind_key(saved_code)
 
     return layout
 
 app = QApplication(sys.argv)
 window = QWidget()
+window.setWindowTitle("Soundboard")
 
 macro_toggle = QCheckBox("Enable Macros")
 macro_toggle.setChecked(True)
@@ -169,32 +182,40 @@ global_controls_layout = QHBoxLayout()
 stop_btn = QPushButton("Stop All Sounds")
 stop_btn.clicked.connect(player.stop)
 
-stop_shortcut_btn = QPushButton(config.get("stop_shortcut", "Set Key"))
+saved_stop_name = config.get("stop_shortcut_name", "Set Key")
+saved_stop_code = config.get("stop_shortcut_code", None)
+stop_shortcut_btn = QPushButton(saved_stop_name)
+
+stop_hook_ref = [None]
+
+def bind_stop_key(scan_code):
+    if stop_hook_ref[0] is not None:
+        try:
+            keyboard.remove_hotkey(stop_hook_ref[0])
+        except Exception:
+            pass
+    stop_hook_ref[0] = keyboard.on_press_key(
+        scan_code, 
+        lambda _: stop_signal.trigger.emit() if macros_active else None, 
+        suppress=False
+    )
 
 def assign_stop_hotkey():
     stop_shortcut_btn.setText("Press a key...")
     def on_key_event(event):
         keyboard.unhook(hook)
-        stop_shortcut_btn.setText(event.name)
-        config["stop_shortcut"] = event.name
+        stop_shortcut_btn.setText(str(event.name))
+        config["stop_shortcut_name"] = event.name
+        config["stop_shortcut_code"] = event.scan_code
         save_config(config)
+        bind_stop_key(event.scan_code)
         
-        keyboard.on_press_key(
-            event.name, 
-            lambda _: stop_signal.trigger.emit() if macros_active else None, 
-            suppress=False
-        )
     hook = keyboard.on_press(on_key_event)
 
 stop_shortcut_btn.clicked.connect(assign_stop_hotkey)
 
-saved_stop_key = config.get("stop_shortcut", "Set Key")
-if saved_stop_key != "Set Key":
-    keyboard.on_press_key(
-        saved_stop_key, 
-        lambda _: stop_signal.trigger.emit() if macros_active else None, 
-        suppress=False
-    )
+if saved_stop_code is not None:
+    bind_stop_key(saved_stop_code)
 
 reset_btn = QPushButton("Reset All Macros")
 
@@ -202,14 +223,16 @@ def reset_macros():
     keyboard.unhook_all()
     
     stop_shortcut_btn.setText("Set Key")
-    config["stop_shortcut"] = "Set Key"
+    config["stop_shortcut_name"] = "Set Key"
+    config["stop_shortcut_code"] = None
 
     for btn in shortcut_buttons:
         btn.setText("Set Key")
         
     for key in config:
-        if isinstance(config[key], dict) and "shortcut" in config[key]:
-            config[key]["shortcut"] = "Set Key"
+        if isinstance(config[key], dict) and "shortcut_code" in config[key]:
+            config[key]["shortcut_name"] = "Set Key"
+            config[key]["shortcut_code"] = None
             
     save_config(config)
 
